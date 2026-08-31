@@ -42,6 +42,7 @@
 #import <YouTubeHeader/YTIBrowseRequest.h>
 #import <YouTubeHeader/YTAssetLoader.h>
 #import <MediaPlayer/MediaPlayer.h>
+#import <AVFoundation/AVFoundation.h>
 #import <YouTubeHeader/ASCollectionView.h>
 #import <YouTubeHeader/YTColor.h>
 #import <YouTubeHeader/YTTypeStyle.h>
@@ -704,6 +705,13 @@ typedef NS_ENUM(NSInteger, SBSegmentAction) {
 extern UIView *sbGetNotificationParent(void);
 extern void sbUpdateOverlayInsetForPivotBar(void);
 extern void YMPresentTabOrderModally(id parentResponder);
+
+NSString *YouModTitleForPlayer(YTPlayerViewController *player);
+NSString *YouModAuthorForPlayer(YTPlayerViewController *player);
+NSURL *YouModThumbnailURL(YTPlayerViewController *player);
+extern YTPlayerViewController *YouModDownloadGetCurrentPlayer(void);
+void YouModActivateNowPlayingForPlayer(YTPlayerViewController *player);
+void YouModHandleAppDidBecomeActive(void);
 
 // The ordered set of SponsorBlock categories YouMod supports. Both the core
 // (segment fetching / skipping) and the settings UI read from this single list,

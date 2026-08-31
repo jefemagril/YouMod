@@ -108,6 +108,156 @@ static void YouModConfigureRemoteSkipCommands(void) {
     }
 }
 
+#pragma mark - Now Playing (lock screen / Control Center tap-to-open)
+
+static const NSTimeInterval YouModNowPlayingRefreshInterval = 1.5;
+static NSTimeInterval gYouModLastNowPlayingRefresh = 0;
+static NSString *gYouModLastNowPlayingArtworkURL = nil;
+static NSString *gYouModLastNowPlayingVideoID = nil;
+static NSURLSessionDataTask *gYouModNowPlayingArtworkTask = nil;
+static __weak MPNowPlayingSession *gYouModNowPlayingSession = nil;
+static BOOL gYouModWasPlayingInBackground = NO;
+static BOOL gYouModNowPlayingObserversRegistered = NO;
+
+static void YouModEnsureAudioSessionForNowPlaying(void) {
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    if (![session.category isEqualToString:AVAudioSessionCategoryPlayback]) {
+        [session setCategory:AVAudioSessionCategoryPlayback error:nil];
+    }
+    [session setActive:YES error:nil];
+}
+
+static void YouModPromoteNowPlayingSession(void) {
+    MPNowPlayingSession *session = gYouModNowPlayingSession;
+    if (!session || session.isActive) return;
+    [session becomeActiveIfPossibleWithCompletion:nil];
+}
+
+static void YouModApplyNowPlayingInfo(NSDictionary *updates) {
+    MPNowPlayingInfoCenter *center = [MPNowPlayingInfoCenter defaultCenter];
+    NSMutableDictionary *info = [center.nowPlayingInfo mutableCopy];
+    if (!info) info = [NSMutableDictionary dictionary];
+    [info addEntriesFromDictionary:updates];
+    center.nowPlayingInfo = info;
+}
+
+static void YouModLoadNowPlayingArtwork(NSURL *thumbnailURL) {
+    if (!thumbnailURL) return;
+    NSString *urlString = thumbnailURL.absoluteString;
+    if (urlString.length == 0) return;
+    if ([gYouModLastNowPlayingArtworkURL isEqualToString:urlString]) return;
+
+    gYouModLastNowPlayingArtworkURL = [urlString copy];
+    [gYouModNowPlayingArtworkTask cancel];
+    gYouModNowPlayingArtworkTask = [[NSURLSession sharedSession] dataTaskWithURL:thumbnailURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (error || data.length == 0) return;
+        UIImage *image = [UIImage imageWithData:data];
+        if (!image) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (![gYouModLastNowPlayingArtworkURL isEqualToString:urlString]) return;
+            MPMediaItemArtwork *artwork = [[MPMediaItemArtwork alloc] initWithBoundsSize:image.size requestHandler:^UIImage * _Nonnull(CGSize size) {
+                return image;
+            }];
+            YouModApplyNowPlayingInfo(@{MPMediaItemPropertyArtwork: artwork});
+        });
+    }];
+    [gYouModNowPlayingArtworkTask resume];
+}
+
+static void YouModRefreshNowPlayingInfo(YTPlayerViewController *player, BOOL force) {
+    if (!IS_ENABLED(BackgroundPlayback) || !player) return;
+
+    NSTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (!force && (now - gYouModLastNowPlayingRefresh) < YouModNowPlayingRefreshInterval) return;
+    gYouModLastNowPlayingRefresh = now;
+
+    NSString *title = YouModTitleForPlayer(player);
+    NSString *author = YouModAuthorForPlayer(player);
+    NSString *videoID = player.currentVideoID;
+    CGFloat elapsed = [player currentVideoMediaTime];
+    CGFloat duration = [player currentVideoTotalMediaTime];
+    BOOL isPlaying = player.playerState == 3;
+
+    NSMutableDictionary *updates = [NSMutableDictionary dictionary];
+    if (title.length > 0) updates[MPMediaItemPropertyTitle] = title;
+    if (author.length > 0) updates[MPMediaItemPropertyArtist] = author;
+    if (duration > 0) updates[MPMediaItemPropertyPlaybackDuration] = @(duration);
+    updates[MPNowPlayingInfoPropertyElapsedPlaybackTime] = @(elapsed);
+    updates[MPNowPlayingInfoPropertyPlaybackRate] = @(isPlaying ? 1.0 : 0.0);
+    updates[MPNowPlayingInfoPropertyMediaType] = @(MPNowPlayingInfoMediaTypeVideo);
+    if (videoID.length > 0) updates[MPNowPlayingInfoPropertyExternalContentIdentifier] = videoID;
+
+    YouModApplyNowPlayingInfo(updates);
+    YouModLoadNowPlayingArtwork(YouModThumbnailURL(player));
+}
+
+void YouModActivateNowPlayingForPlayer(YTPlayerViewController *player) {
+    if (!IS_ENABLED(BackgroundPlayback) || !player) return;
+
+    NSString *videoID = player.currentVideoID;
+    if (videoID.length > 0 && ![videoID isEqualToString:gYouModLastNowPlayingVideoID]) {
+        gYouModLastNowPlayingVideoID = [videoID copy];
+        gYouModLastNowPlayingArtworkURL = nil;
+    }
+
+    [[UIApplication sharedApplication] beginReceivingRemoteControlEvents];
+    YouModEnsureAudioSessionForNowPlaying();
+    YouModRefreshNowPlayingInfo(player, YES);
+    YouModPromoteNowPlayingSession();
+    YouModConfigureRemoteSkipCommands();
+}
+
+static void YouModHandlePlaybackBackgroundTransition(void) {
+    YTPlayerViewController *player = YouModDownloadGetCurrentPlayer();
+    if (!player || !IS_ENABLED(BackgroundPlayback)) return;
+    if (player.playerState == 3) gYouModWasPlayingInBackground = YES;
+    YouModActivateNowPlayingForPlayer(player);
+}
+
+void YouModHandleAppDidBecomeActive(void) {
+    if (!gYouModWasPlayingInBackground || !IS_ENABLED(BackgroundPlayback)) return;
+    gYouModWasPlayingInBackground = NO;
+
+    YTPlayerViewController *player = YouModDownloadGetCurrentPlayer();
+    if (!player || player.playerState != 3) return;
+    if (![player respondsToSelector:@selector(YouModAutoFullscreen)]) return;
+    [player performSelector:@selector(YouModAutoFullscreen) withObject:nil afterDelay:0.1];
+}
+
+static void YouModRegisterNowPlayingObservers(void) {
+    if (gYouModNowPlayingObserversRegistered) return;
+    gYouModNowPlayingObserversRegistered = YES;
+
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    [nc addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(__unused NSNotification *note) {
+        YouModHandlePlaybackBackgroundTransition();
+    }];
+    [nc addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(__unused NSNotification *note) {
+        YouModHandlePlaybackBackgroundTransition();
+    }];
+}
+
+%hook MPNowPlayingSession
+- (instancetype)initWithPlayers:(NSArray *)players {
+    MPNowPlayingSession *session = %orig;
+    gYouModNowPlayingSession = session;
+    if (IS_ENABLED(BackgroundPlayback)) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            YouModEnsureAudioSessionForNowPlaying();
+            [session becomeActiveIfPossibleWithCompletion:nil];
+        });
+    }
+    return session;
+}
+
+- (void)becomeActiveIfPossibleWithCompletion:(void (^)(BOOL))completion {
+    if (IS_ENABLED(BackgroundPlayback) && YouModDownloadGetCurrentPlayer()) {
+        YouModEnsureAudioSessionForNowPlaying();
+    }
+    %orig(completion);
+}
+%end
+
 static void YouModAddEndTime(YTPlayerViewController *self, YTSingleVideoController *video, YTSingleVideoTime *time) {
     if (!IS_ENABLED(ShowExtraTimeRemaining) && !IS_ENABLED(SBShowDuration)) return;
 
@@ -427,7 +577,7 @@ static void YouModAddEndTime(YTPlayerViewController *self, YTSingleVideoControll
     YTPlayerView *playerview = [sgvid valueForKey:@"_playerView"];
     YTPlayerViewController *playerviewController = [playerview valueForKey:@"_playerViewDelegate"];
     YouModDownloadSetCurrentPlayer(playerviewController);
-    YouModConfigureRemoteSkipCommands();
+    YouModActivateNowPlayingForPlayer(playerviewController);
     if (INTFORVAL(AutoDRCAudioIndex) != 0) [playerviewController YouModAutoDRCAudio];
     if (INTFORVAL(AudioTrack) != 0) [playerviewController performSelector:@selector(YouModAutoAudioTrack) withObject:nil afterDelay:0.1];
     if (YMIsOverlayButtonEnabled(@"mute.video")) [playerviewController YouModAutoMute];
@@ -1111,11 +1261,13 @@ static CGFloat remainingOverlayWidth(YTPlayerViewController *pvc, CGFloat fullWi
 - (void)singleVideo:(YTSingleVideoController *)video currentVideoTimeDidChange:(YTSingleVideoTime *)time {
     %orig;
     YouModAddEndTime(self, video, time);
+    YouModRefreshNowPlayingInfo(self, NO);
 }
 
 - (void)potentiallyMutatedSingleVideo:(YTSingleVideoController *)video currentVideoTimeDidChange:(YTSingleVideoTime *)time {
     %orig;
     YouModAddEndTime(self, video, time);
+    YouModRefreshNowPlayingInfo(self, NO);
 }
 
 %new
@@ -1573,7 +1725,7 @@ static void YouModFilterVideoButtons(_ASDisplayView *view, NSString *iden) {
 
 %ctor {
     %init;
-    YouModConfigureRemoteSkipCommands();
+    YouModRegisterNowPlayingObservers();
     if (IS_ENABLED(OldQualityPicker)) {
         %init(OldVideoQuality);
     }

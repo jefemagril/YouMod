@@ -641,12 +641,12 @@ static YTIVideoDetails *YouModVideoDetailsForPlayer(YTPlayerViewController *play
     return ires.videoDetails;
 }
 
-static NSString *YouModAuthorForPlayer(YTPlayerViewController *player) {
+NSString *YouModAuthorForPlayer(YTPlayerViewController *player) {
     YTIVideoDetails *details = YouModVideoDetailsForPlayer(player);
     return details.author;
 }
 
-static NSString *YouModTitleForPlayer(YTPlayerViewController *player) {
+NSString *YouModTitleForPlayer(YTPlayerViewController *player) {
     YTIVideoDetails *details = YouModVideoDetailsForPlayer(player);
     return details.title;
 }
@@ -759,7 +759,7 @@ static YTPlayerViewController *YouModPlayerFromViewController(UIViewController *
     return YouModCurrentPlayerViewController;
 }
 
-static NSURL *YouModThumbnailURL(YTPlayerViewController *player) {
+NSURL *YouModThumbnailURL(YTPlayerViewController *player) {
     if (!player) return nil;
     YTIVideoDetails *details = YouModVideoDetailsForPlayer(player);
     YTIThumbnailDetails *thumbmain = details.thumbnail;

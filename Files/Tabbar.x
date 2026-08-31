@@ -322,6 +322,7 @@ static BOOL isTabSelected = NO;
 %hook YTAppDelegate
 - (void)appDidBecomeActive {
     %orig;
+    YouModHandleAppDidBecomeActive();
     if (IS_ENABLED(AutoOpenLink)) {
         UIViewController *topVC = YouModTopViewController(nil);
         YMOpenLinkFromClipboard(topVC, NO);
