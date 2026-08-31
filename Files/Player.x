@@ -1,4 +1,6 @@
 #import "Headers.h"
+#import <objc/message.h>
+#import <substrate.h>
 
 static BOOL isWiFiConnected() {
     struct sockaddr_in zeroAddress;
