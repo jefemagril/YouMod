@@ -115,9 +115,13 @@ static NSTimeInterval gYouModLastNowPlayingRefresh = 0;
 static NSString *gYouModLastNowPlayingArtworkURL = nil;
 static NSString *gYouModLastNowPlayingVideoID = nil;
 static NSURLSessionDataTask *gYouModNowPlayingArtworkTask = nil;
-static __weak MPNowPlayingSession *gYouModNowPlayingSession = nil;
+static __weak id gYouModNowPlayingSession = nil;
 static BOOL gYouModWasPlayingInBackground = NO;
 static BOOL gYouModNowPlayingObserversRegistered = NO;
+static BOOL gYouModNowPlayingSessionHooksInstalled = NO;
+
+static id (*YouModOrig_NPS_initWithPlayers)(id self, SEL _cmd, NSArray *players);
+static void (*YouModOrig_NPS_becomeActive)(id self, SEL _cmd, void (^completion)(BOOL));
 
 static void YouModEnsureAudioSessionForNowPlaying(void) {
     AVAudioSession *session = [AVAudioSession sharedInstance];
@@ -128,9 +132,13 @@ static void YouModEnsureAudioSessionForNowPlaying(void) {
 }
 
 static void YouModPromoteNowPlayingSession(void) {
-    MPNowPlayingSession *session = gYouModNowPlayingSession;
-    if (!session || session.isActive) return;
-    [session becomeActiveIfPossibleWithCompletion:nil];
+    if (@available(iOS 16.0, *)) {
+        id session = gYouModNowPlayingSession;
+        if (!session) return;
+        BOOL isActive = ((BOOL (*)(id, SEL))objc_msgSend)(session, @selector(isActive));
+        if (isActive) return;
+        ((void (*)(id, SEL, void (^)(BOOL)))objc_msgSend)(session, @selector(becomeActiveIfPossibleWithCompletion:), nil);
+    }
 }
 
 static void YouModApplyNowPlayingInfo(NSDictionary *updates) {
@@ -237,26 +245,36 @@ static void YouModRegisterNowPlayingObservers(void) {
     }];
 }
 
-%hook MPNowPlayingSession
-- (instancetype)initWithPlayers:(NSArray *)players {
-    MPNowPlayingSession *session = %orig;
+static id YouMod_NPS_initWithPlayers(id self, SEL _cmd, NSArray *players) {
+    id session = YouModOrig_NPS_initWithPlayers(self, _cmd, players);
     gYouModNowPlayingSession = session;
     if (IS_ENABLED(BackgroundPlayback)) {
         dispatch_async(dispatch_get_main_queue(), ^{
             YouModEnsureAudioSessionForNowPlaying();
-            [session becomeActiveIfPossibleWithCompletion:nil];
+            ((void (*)(id, SEL, void (^)(BOOL)))objc_msgSend)(session, @selector(becomeActiveIfPossibleWithCompletion:), nil);
         });
     }
     return session;
 }
 
-- (void)becomeActiveIfPossibleWithCompletion:(void (^)(BOOL))completion {
+static void YouMod_NPS_becomeActive(id self, SEL _cmd, void (^completion)(BOOL)) {
     if (IS_ENABLED(BackgroundPlayback) && YouModDownloadGetCurrentPlayer()) {
         YouModEnsureAudioSessionForNowPlaying();
     }
-    %orig(completion);
+    YouModOrig_NPS_becomeActive(self, _cmd, completion);
 }
-%end
+
+static void YouModInstallNowPlayingSessionHooks(void) {
+    if (gYouModNowPlayingSessionHooksInstalled) return;
+    if (!@available(iOS 16.0, *)) return;
+
+    Class sessionClass = NSClassFromString(@"MPNowPlayingSession");
+    if (!sessionClass) return;
+
+    gYouModNowPlayingSessionHooksInstalled = YES;
+    MSHookMessageEx(sessionClass, @selector(initWithPlayers:), (IMP)YouMod_NPS_initWithPlayers, (IMP *)&YouModOrig_NPS_initWithPlayers);
+    MSHookMessageEx(sessionClass, @selector(becomeActiveIfPossibleWithCompletion:), (IMP)YouMod_NPS_becomeActive, (IMP *)&YouModOrig_NPS_becomeActive);
+}
 
 static void YouModAddEndTime(YTPlayerViewController *self, YTSingleVideoController *video, YTSingleVideoTime *time) {
     if (!IS_ENABLED(ShowExtraTimeRemaining) && !IS_ENABLED(SBShowDuration)) return;
@@ -1726,6 +1744,7 @@ static void YouModFilterVideoButtons(_ASDisplayView *view, NSString *iden) {
 %ctor {
     %init;
     YouModRegisterNowPlayingObservers();
+    YouModInstallNowPlayingSessionHooks();
     if (IS_ENABLED(OldQualityPicker)) {
         %init(OldVideoQuality);
     }
